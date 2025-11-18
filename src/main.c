@@ -4,6 +4,7 @@
 //
 // SPDX-License-Identifier: BSD-3-Clause
 //
+#include <sys/types.h>
 #include <sys/socket.h>
 
 #include <unistd.h>
@@ -16,6 +17,8 @@
 #include <errno.h>
 
 #include <netinet/in.h>
+#include <netinet/ip.h>
+
 #include <arpa/inet.h>
 
 #define IPPROTO_LLPRC 0xFC
@@ -119,13 +122,19 @@ static int server(struct in_addr local_addr, struct in_addr remote_addr)
             continue;
 
         if (fds[0].revents & POLLIN) {
+            // On receiving IP header is always included!
+            struct pkt {
+                struct ip hdr;
+                struct rpc_message_header msg;
+            } buf;
+
             src_len = sizeof(src);
-            ssize_t rv = recvfrom(fd, &msg, sizeof(msg), 0, (struct sockaddr *)&src, &src_len);
+            ssize_t rv = recvfrom(fd, &buf, sizeof(buf), 0, (struct sockaddr *)&src, &src_len);
             if (rv < 0) {
                 fprintf(stderr, "Failed to receive message: %s\n", strerror(errno));
             } else {
                 fprintf(stderr, "receviced %zd bytes:\n", rv);
-                message_dump(&src, &msg);
+                message_dump(&src, &buf.msg);
             }
         }
 
@@ -169,15 +178,30 @@ static int endpoint_open(struct in_addr local_addr)
         return -1;
     }
 
-    memset(&sin, 0, sizeof(sin));
+    bool ok = false;
+    do {
+        int opt = 0;
+        if (setsockopt(fd, IPPROTO_IP, IP_HDRINCL, &opt, sizeof(opt)) < 0) {
+            fprintf(stderr, "Unable to set socket options: %s\n", strerror(errno));
+            break;
+        }
 
-    sin.sin_len    = sizeof(struct sockaddr_in);
-    sin.sin_family = AF_INET;
-    sin.sin_addr   = local_addr;
+        memset(&sin, 0, sizeof(sin));
 
-    if (bind(fd, (struct sockaddr *)&sin, sizeof(sin)) < 0) {
+        sin.sin_len    = sizeof(struct sockaddr_in);
+        sin.sin_family = AF_INET;
+        sin.sin_addr   = local_addr;
+
+        if (bind(fd, (struct sockaddr *)&sin, sizeof(sin)) < 0) {
+            fprintf(stderr, "Unable to bind LLRPC socket: %s\n", strerror(errno));
+            break;
+        }
+
+        ok = true;
+    } while (false);
+
+    if (!ok) {
         close(fd);
-        fprintf(stderr, "Unable to bind LLRPC socket: %s\n", strerror(errno));
         return -1;
     }
 
